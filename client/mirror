@@ -1,0 +1,85 @@
+#!/bin/bash
+set -euo pipefail
+HERE=$(dirname "$(realpath "$0")")
+. "$HERE/../env.sh" "$HERE" IP SESSION WINDOW
+
+named=
+ensure() {
+  if ! tmux has-session -t =billboard 2>/dev/null; then
+    tmux new-session -d -s billboard -n "$WINDOW" -c "$HOME"
+    tmux set -t =billboard: status off
+    tmux set -w -t =billboard: allow-rename off
+    tmux set -w -t =billboard: window-size manual
+    tmux resize-window -t =billboard: -x "$COLS" -y "$ROWS"
+  fi
+  win=$(tmux display -p -t =billboard: '#{window_id}')
+  [ -n "$(tmux list-windows -t "=$SESSION" -F x -f "#{==:#{window_id},$win}")" ] || tmux link-window -d -s =billboard: -t "=$SESSION:"
+  if [ -z "$named" ]; then
+    tmux rename-window -t =billboard: "$WINDOW"
+    named=1
+  fi
+  if ! tmux has-session -t =billboard-render 2>/dev/null; then
+    tmux new-session -d -s billboard-render 'while :; do env -u TMUX tmux attach -f ignore-size -t =billboard; sleep 1; done'
+    tmux set -t =billboard-render: status off
+    tmux set -w -t =billboard-render: window-size manual
+    tmux resize-window -t =billboard-render: -x "$COLS" -y "$ROWS"
+  fi
+}
+
+viewed() {
+  tmux list-clients -F '#{client_session} #{window_id} #{client_flags}' | awk -v w="$1" '$1 != "billboard" && $2 == w && $3 ~ /focused/ {f=1} END {exit !f}'
+}
+
+size_mode=
+follow_focus() {
+  local mode=remote
+  if viewed "$win"; then
+    mode=local
+  fi
+  [ "$mode" = "$size_mode" ] && return
+  size_mode=$mode
+  if [ "$mode" = local ]; then
+    tmux set -w -t =billboard: window-size smallest
+  else
+    tmux set -w -t =billboard: window-size manual
+    tmux resize-window -t =billboard: -x "$COLS" -y "$ROWS"
+  fi
+}
+
+centered() {
+  printf '\ec\e[?25l\e[%d;%dH%s' $((ROWS / 2)) $(((COLS - ${#1}) / 2 + 1)) "$1"
+}
+
+frames() {
+  local shown=
+  while :; do
+    if tmux has-session -t "=$SESSION" 2>/dev/null; then
+      shown=
+      ensure
+      follow_focus
+      printf '\e[?25l\e[H'
+      tmux capture-pane -ep -t =billboard-render: | sed 's/$/\x1b[0m\x1b[K/' | head -c -1
+      printf '\e[J'
+    elif [ -z "$shown" ]; then
+      centered "start tmux session $SESSION to begin mirroring window $WINDOW"
+      shown=1
+    fi
+    sleep "$FRAME_SECONDS"
+  done
+}
+
+connect() {
+  coproc FRAMES { frames; }
+  ssh -i "$HOME/.ssh/$SSH_KEY_NAME" -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "root@$IP" \
+    "trap '' HUP; cat > /run/billboard-terminal; printf %s $(printf %q "$(centered "no billboard-mirror service connected to $IP")") > /run/billboard-terminal" <&"${FRAMES[0]}" || true
+  kill "$FRAMES_PID"
+  wait "$FRAMES_PID" || true
+}
+
+while :; do
+  connect
+  sleep 2
+  until win=$(tmux display -p -t =billboard: '#{window_id}' 2>/dev/null) && viewed "$win"; do
+    sleep 1
+  done
+done

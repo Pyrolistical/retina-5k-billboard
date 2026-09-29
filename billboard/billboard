@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+HERE=$(dirname "$(realpath "$0")")
+. "$HERE/../env.sh" "$HERE" IP
+
+SSH_OPTS=(-i "$HOME/.ssh/$SSH_KEY_NAME" -o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%C" -o ControlPersist=60)
+SSH=(ssh "${SSH_OPTS[@]}" "root@$IP")
+D=/tmp/billboard-$$
+
+upload() {
+  local r
+  r=$(printf '%q' "$2")
+  "${SSH[@]}" "cat > $r.part && mv $r.part $r" < "$1"
+}
+
+cleanup() {
+  if [ -n "${bg:-}" ] && kill -STOP "$bg" 2>/dev/null; then
+    pkill -P "$bg" || true
+    kill -KILL "$bg"
+  fi
+  "${SSH[@]}" "rm -rf $D"
+}
+
+shared() {
+  local s
+  for s in $SHARES; do
+    case $1 in "$s"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+images() {
+  local paths=() locals=() remotes=() f p r i=0 start=0 j
+  for f in "$@"; do
+    p=$(realpath -e "$f")
+    if shared "$p"; then
+      paths+=("$p")
+    else
+      r="$D/$(printf '%04d' $i)-$(basename "$p")"
+      locals+=("$p"); remotes+=("$r"); paths+=("$r")
+    fi
+    i=$((i + 1))
+  done
+  trap cleanup EXIT
+  for ((j = 0; j < ${#locals[@]}; j++)); do
+    printf '%s %s\n' "$(stat -c %s "${locals[j]}")" "${remotes[j]}"
+  done | "${SSH[@]}" "mkdir -p $D && cat > $D/.manifest"
+  if [ ${#locals[@]} -gt 0 ] && [ "${paths[0]}" = "${remotes[0]}" ]; then
+    upload "${locals[0]}" "${remotes[0]}"
+    start=1
+  fi
+  (for ((j = start; j < ${#locals[@]}; j++)); do upload "${locals[j]}" "${remotes[j]}"; done) &
+  bg=$!
+  ssh -qt "${SSH_OPTS[@]}" "root@$IP" "WAIT_MANIFEST=$D/.manifest show $(printf '%q ' "${paths[@]}")" < /dev/tty
+}
+
+if [ $# -eq 0 ] && [ ! -t 0 ]; then
+  mapfile -t args
+  set -- "${args[@]}"
+fi
+[ $# -gt 0 ] || { echo "usage: billboard IMAGE... or: fd ... | billboard" >&2; exit 2; }
+images "$@"

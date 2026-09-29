@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+BAR=$(printf '!%.0s' {1..72})
+printf '\n\e[1;31m%s\n%s\n\n    WARNING: EVERYTHING ON %s WILL BE PERMANENTLY ERASED\n    on %s, there is no undo\n\n%s\n%s\e[0m\n\n%s\n\n' "$BAR" "$BAR" "$1" "$2" "$BAR" "$BAR" "$3"
+read -r -p "type ERASE to erase $1: " ANSWER < /dev/tty
+[ "$ANSWER" = ERASE ] || { echo "not erased" >&2; exit 1; }

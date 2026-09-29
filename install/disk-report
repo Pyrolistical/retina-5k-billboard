@@ -1,0 +1,50 @@
+#!/bin/bash
+set -euo pipefail
+D=$1
+
+[ -b "$D" ] || { echo "$D is not a block device" >&2; exit 1; }
+read -r TYPE RM TRAN < <(lsblk -dnro TYPE,RM,TRAN "$D")
+[ "$TYPE" = disk ] || { echo "$D is a $TYPE, not a disk" >&2; exit 1; }
+case $2 in
+  internal) [ "$RM" = 0 ] && [ "$TRAN" != usb ] || { echo "$D is removable, refusing to erase it" >&2; exit 1; } ;;
+  usb) [ "$TRAN" = usb ] || { echo "$D is not a USB disk, refusing to erase it" >&2; exit 1; } ;;
+  *) echo "usage: disk-report DISK internal|usb" >&2; exit 2 ;;
+esac
+
+printf 'disk:      %s\n' "$D"
+printf 'model:     %s\n' "$(lsblk -dno MODEL "$D")"
+printf 'serial:    %s\n' "$(lsblk -dno SERIAL "$D")"
+printf 'capacity:  %s\n' "$(lsblk -dno SIZE "$D")"
+printf 'transport: %s\n' "${TRAN:-unknown}"
+echo
+echo 'partitions:'
+lsblk -lpo NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL "$D"
+echo
+echo 'file systems:'
+usage() {
+  df -h --output=used,size,avail "$1" | tail -1 | {
+    read -r U S A
+    printf '  %s %s: %s free, %s used of %s%s\n' "$P" "$FS" "$A" "$U" "$S" "$2"
+  }
+}
+M=$(mktemp -d)
+lsblk -nrpo NAME,FSTYPE "$D" | while read -r P FS; do
+  [ -n "$FS" ] || continue
+  case $FS in
+    swap) printf '  %s swap\n' "$P"; continue ;;
+    ext2|ext3|ext4) O=ro,noload ;;
+    xfs) O=ro,norecovery ;;
+    btrfs) O=ro,rescue=nologreplay ;;
+    *) O=ro ;;
+  esac
+  MP=$(lsblk -nro MOUNTPOINT "$P" | head -1)
+  if [ -n "$MP" ]; then
+    usage "$MP" ", mounted at $MP"
+  elif mount -t "$FS" -o "$O" "$P" "$M" 2>/dev/null; then
+    usage "$M" ""
+    umount "$M"
+  else
+    printf '  %s %s: free space unknown, cannot mount read-only\n' "$P" "$FS"
+  fi
+done
+rmdir "$M"
